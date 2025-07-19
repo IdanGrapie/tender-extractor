@@ -3,3 +3,6 @@ __pycache__/
 *.pyc
 output*
 venv/
+.idea/
+data/
+test_regex_node.py

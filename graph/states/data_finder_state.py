@@ -25,8 +25,6 @@ class State(TypedDict):
     parameters: Annotated[list, take_last_value] 
     converted_pdf: Annotated[list, take_last_value]
     candidates: Annotated[list, take_last_value]
+    param_page_map: Annotated[dict, take_last_value]
     result: Annotated[dict, take_last_value]
-    five_score_flag: Annotated[dict, take_last_value]
-  
-
 

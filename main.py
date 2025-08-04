@@ -10,6 +10,7 @@ load_dotenv()
 def help():
     return """to use for pass json and pdf"""
 
+
 def main():
 
     path_to_json = sys.argv[1]
@@ -17,7 +18,8 @@ def main():
 
     if path_to_json in ["--help", "--h"] or not path_to_pdf:
         return help()
-    
+
+
 
     # Run the data extraction flow
     result = data_finder_flow.invoke({
@@ -27,6 +29,8 @@ def main():
     })
     print(result)
 
+    print("Data extraction completed")
+
     # Generate output file name based on PDF name
     pdf_name = os.path.splitext(os.path.basename(path_to_pdf))[0]
     output_path = f"{pdf_name}_results.json"
@@ -34,8 +38,6 @@ def main():
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
 
-    print(f"\nSaved result to {output_path}")
-        
 
 if __name__ == "__main__":
     main()

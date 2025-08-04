@@ -1,246 +1,213 @@
+# Standard
+import json
+import re
+
+# Third-party
+import pytesseract
+from pdf2image import convert_from_path
+
+# LangChain / LangGraph
 from langgraph.prebuilt import create_react_agent
 from langchain.chat_models import init_chat_model
+
+# Project
 from graph.states.data_finder_state import InputState, State, OutputState
-import json
-from langchain.document_loaders import PyPDFLoader
-from pydantic import create_model
 from graph.utils.convert_to_model import convert_to_model 
-import re
+from graph.utils.relevant_pages_model import convert_to_page_model
+from graph.utils.variables import POPLER_PATH, DEFAULT_EXTRACTION_INSTRUCTIONS
+from graph.utils.config import get_agent
 
 
 def load_data(input_state: InputState) -> State:
-    
+    print("Loading parameters from JSON...")
     with open(input_state["path_to_json"], "r", encoding="utf-8") as f:
         parameters = json.load(f)
 
     return {
         "path_to_json": input_state["path_to_json"],
         "path_to_pdf": input_state["path_to_pdf"],
-        "parameters": parameters,
+        "parameters": parameters
     }
+
 
 
 def convert_pdf_text_pages(state: State) -> State:
-    loader = PyPDFLoader(state["path_to_pdf"])
-    pages = loader.load_and_split()
+    path_to_pdf = state["path_to_pdf"]
 
-    result = [page.page_content for page in pages]
+    # Step 1: Convert PDF pages to images
+    images = convert_from_path(path_to_pdf, poppler_path=POPLER_PATH)
 
-    return {"converted_pdf": result }
+    # Step 2: Extract text from each image using pytesseract
+    result = {}
+    for i, image in enumerate(images):
+        data = pytesseract.image_to_data(image, lang='heb+eng', output_type=pytesseract.Output.DICT)
+        text = " ".join([word for word in data["text"] if word.strip() != ""])
+        result[str(i + 1)] = text
 
 
-
-def regex_filter_pages(state: State) -> State:
-    keywords = {
-    "client_name": [r"בע[\"״]מ", r"אנחנו\s?ב", r"תאגיד"],
-    "tender_name": [r"מספר\s?מכרז", r"מכרז\s?פומבי"],
-    "threshold_conditions": [r"תנאי\s?סף", r"השתתפות.*?מותנית", r"דרישות.*?סף"],
-    "contract_period": [r"תקופת\s?ההסכם", r"משך\s?ההסכם", r"תוקף.*?הסכם"],
-    "evaluation_method": [r"אופן.*?בחירת.*?הזוכה", r"מדדים.*?לבחירה", r"מחיר"],
-    "bid_guarantee": [r"ערבות.*?מכרז", r"דמי\s?השתתפות", r"סכום.*?שיש\s?להפקיד"],
-    "idea_author": [r"רעיון.*?מקורי", r"הוגה.*?הרעיון", r"יזם"]
-    }
-    
-    
-    
-    param_page_map = {param: [] for param in keywords}
-
-    for i, page in enumerate(state["converted_pdf"]):
-        for param, patterns in keywords.items():
-            for pattern in patterns:
-                if re.search(pattern, page):
-                    param_page_map[param].append(i + 1)  # 1-based indexing
-                    break
+    print(f"Loaded and OCR-scanned {len(result)} pages")
 
     return {
-        "param_page_map": param_page_map
+        "converted_pdf": result
     }
 
 
 
+def find_relevant_pages(state: State) -> State:
+    print("Running find_relevant_pages (batched)...")
 
-def scorer(state: State) -> State:
+    pages = state["converted_pdf"]
+    parameters = state["parameters"]
 
+    page_numbers = sorted([int(k) for k in pages.keys()])
+    response_model = convert_to_page_model(parameters)
+    agent = get_agent(response_model)
 
-    instructions = f"""
-אתה מומחה באיתור נתונים     
+    combined_result = {param: {"pages": [], "summary": ""} for param in parameters}
+    chunk_size = 10
 
-    המטרה שלך היא לאתר ולחלץ ערכים מדויקים מתוך טקסט של מכרז לפי שמות פרמטרים מוגדרים מראש.
+    for i in range(0, len(page_numbers), chunk_size):
+        chunk = page_numbers[i:i+chunk_size]
+        chunk_text = "\n\n".join([
+            f"Page {page_num}:\n{pages[str(page_num)]}"
+            for page_num in chunk if str(page_num) in pages
+        ])
 
-    אתה מצויד בטקסט ופרמטרים אותם תצטרך למצוא על גבי הטקסט.
+        instructions = f"""
+אתה מקבל טקסט של מכרז מתוך העמודים הבאים: {chunk}
 
-    הוראות:
-    - אם ערך מופיע יותר מפעם אחת — בחר את הנוסח הכי שלם, ברור ומדויק.
-    -threshold_conditions: תחפש את תנאים המופעים בטופס ואתה רשאי לפרט 
-    -contract_period: כמות הזמן שהחוזה יהיה בתוקף, נמצא תחת כותרות כגון: תקופת ההסכם, זמן ההסכם, משך החוזה 
-    -bid_guarantee:תחפש את סכום הכסף שצריך לקבל
-    -evaluation method: תחפש מתחת לכותרות כגון חישוב משוקלל, מרכיבי ההצעה, וחפש מילות מפתח כגון איכות, מחיר, זמן    
-    - בשדה "source" ציין תמיד את מספר העמוד ואת המיקום בו נמצא המידע: פסקה, שורה או טבלה. לדוגמה: "עמוד 2, פסקה ראשונה".
-    - ציין תמיד את מספר העמוד **כפי שהוא מופיע בתחתית הדף**, לא לפי המספור במערכת.
-    
+המטרה שלך היא לזהות אילו עמודים רלוונטיים לכל אחד מהפרמטרים הבאים:
+{', '.join(parameters)}
 
-    חישוב score:
-    - אם לא מצאת מידע על פרמטר מסוים, תחזיר עבורו:
-    answer: ""
-    details: ""
-    source: "לא נמצא"
-    score: 0
-    - אם אתה חושב שהמידע יכול להיות קשור אבל לא בוודאות תחזיר 3
-    - אם אתה בטוח שהמידע נכון תחזיר 5
+עבור כל פרמטר:
+- אם עמודים שונים מכילים מידע זהה (למשל חזרה על שם הלקוח בלבד בלי מידע חדש), החזר רק את העמוד שבו זה הופיע לראשונה או שבו ההקשר הוא המשמעותי ביותר
+- החזר רשימת מספרי עמודים (כפי שמופיעים בתחתית העמוד)
+- תן הסבר קצר מה יש בכל עמוד שמצדיק את הקשר לפרמטר
+- אל תכלול עמודים שמכילים רק מידע שחוזר על עצמו כמו שם המכרז או שם הלקוח בכותרת או בפסקת הפתיחה — אלא אם יש בהם מידע חדש או ייחודי
+- אל תחזור על עמודים שכבר זוהו כאילו מכילים את אותו מידע בדיוק באצוות קודמות
 
-    ---
-
-    הפרמטרים לחילוץ יופיעו מיד לאחר ההוראות. לאחר מכן יופיע הטקסט המלא של המכרז ממנו יש לחלץ את הערכים.
-    """
-
-
-    response_model = convert_to_model(state["parameters"])
-
-
-    engine = init_chat_model(
-        model="gpt-4.1",
-        temperature=0.2,
-    )
-
-    agent = create_react_agent(
-        model=engine,
-        response_format=response_model,
-        tools=[] # use to trigger functions
-    )
-
-    result = []
-
-    five_score_flag = {param: False for param in state["parameters"]}
-
-    param_page_map = state.get("param_page_map", {}) 
-
-    # Create a union of all pages used across all parameters
-    used_pages = sorted(set(
-        page
-        for pages in param_page_map.values()
-        for page in pages
-    ))
-
-    for page_num in used_pages:
-        page = state["converted_pdf"][page_num - 1]
+החזר תשובה כ-JSON בלבד לפי הפורמט המוגדר מראש.
+"""
 
 
         messages = [
-            {"role": "system", "content": instructions},  #sends both the extraction instructions and the current page text.
-            {"role": "user", "content": f'parameters:{state["parameters"]} text:{page}'}
+            {"role": "system", "content": instructions},
+            {"role": "user", "content": chunk_text}
         ]
-
 
         try:
             response = agent.invoke({"messages": messages})
             structured = response.get("structured_response", response)
+            result = structured.model_dump()
 
-       
-            for param, value in structured.model_dump().items():
-                if value.get("score") == 5:
-                    five_score_flag[param] = True
-
-            result.append(structured)
+            for param, data in result.items():
+                combined_result[param]["pages"] += data["pages"]
+                combined_result[param]["summary"] += " " + data["summary"]
 
         except Exception as e:
-            print(f"Error on page {page_num}: {e}")
-            continue # Skip to the next page instead of failing the entire run
+            print(f"Error in batch {chunk}: {e}")
+            continue
+
+    # Remove duplicate pages
+    for param in combined_result:
+        combined_result[param]["pages"] = sorted(list(set(combined_result[param]["pages"])))
+
+    print("\n=== Final Relevant Pages Map ===")
+    for param, data in combined_result.items():
+        print(f"{param}: pages {data['pages']}, summary: {data['summary']}")
+
     return {
-        "candidates": result,
-        "five_score_flag": five_score_flag  # Used to check if any param is still missing after scoring
+        "param_page_map": combined_result
     }
 
 
 
-def recheck(state: State) -> State:
-
-    instructions = f"""
-אתה מומחה באיתור נתונים     
-
-    המטרה שלך היא לאתר ולחלץ ערכים מדויקים מתוך טקסט של מכרז לפי שמות פרמטרים מוגדרים מראש.
-
-    אתה מצויד בטקסט ופרמטרים אותם תצטרך למצוא על גבי הטקסט.
-
-    הוראות:
-    - אם ערך מופיע יותר מפעם אחת — בחר את הנוסח הכי שלם, ברור ומדויק.
-    -threshold_conditions: תחפש את תנאים המופעים בטופס
-    -contract_period: כמות הזמן שהחוזה יהיה בתוקף, נמצא תחת כותרות כגון: תקופת ההסכם, זמן ההסכם, משך החוזה 
-    -bid_guarantee:תחפש את סכום הכסף שצריך לקבל
-    -evaluation method: תחפש מתחת לכותרות כגון חישוב משוקלל, מרכיבי ההצעה, וחפש מילות מפתח כגון איכות, מחיר, זמן    
-    - בשדה "source" ציין תמיד את מספר העמוד ואת המיקום בו נמצא המידע: פסקה, שורה או טבלה. לדוגמה: "עמוד 2, פסקה ראשונה".
-    - ציין תמיד את מספר העמוד **כפי שהוא מופיע בתחתית הדף**, לא לפי המספור במערכת.
-    -
-
-    חישוב score:
-    - אם לא מצאת מידע על פרמטר מסוים, תחזיר עבורו:
-    answer: ""
-    details: ""
-    source: "לא נמצא"
-    score: 0
-    - אם אתה חושב שהמידע יכול להיות קשור אבל לא בוודאות תחזיר 3
-    - אם אתה בטוח שהמידע נכון תחזיר 5
-
-    ---
-
-    הפרמטרים לחילוץ יופיעו מיד לאחר ההוראות. לאחר מכן יופיע הטקסט המלא של המכרז ממנו יש לחלץ את הערכים.
-    """
-    engine = init_chat_model("gpt-4.1", temperature=0.2)
-    response_model = convert_to_model(state["parameters"])
-    agent = create_react_agent(
-        model=engine,
-        response_format=response_model,
-        tools=[] # use to trigger functions
-    )
-
-
-    total_pages = len(state["converted_pdf"])
-    # gives only the scanned pages
-    used_pages = set(
-        page
-        for pages in state.get("param_page_map", {}).values()
-        for page in pages
-    )
+def info_extraction(state: State) -> State:
     
-    missed_pages = set(range(1, total_pages + 1)) - used_pages
+    print("\n Running info_extraction...")
 
-    results = []
+    param_page_map = state["param_page_map"]
 
-    for page_num, page in enumerate(state["converted_pdf"], start=1):
-        if page_num not in missed_pages:
+    # formatting the map to readable string
+    page_map_summary = "\n".join([
+    f"- {param}: pages {data['pages']}, summary: {data['summary']}"
+    for param, data in param_page_map.items()
+    ])
+    
+
+    instructions = DEFAULT_EXTRACTION_INSTRUCTIONS.format(page_map=page_map_summary)
+
+
+    parameters = state["parameters"]
+    pages = state["converted_pdf"]
+    param_page_map = state["param_page_map"]
+
+    response_model = convert_to_model(parameters)
+    agent = get_agent(response_model)
+
+    result = []
+
+    print("Starting extraction per parameter...")
+
+    #combining text per parameter
+    for param in parameters:
+        relevant_pages = param_page_map.get(param, {}).get("pages", [])
+        print(f"\n Param: {param}, Pages: {relevant_pages}")
+
+        combined_text = "\n\n".join([
+            f"Page {page_num}:\n{pages[str(page_num)]}"
+            for page_num in relevant_pages if str(page_num) in pages
+        ])
+
+
+        if not combined_text:
+            print(f"No text found for parameter '{param}' – skipping")
             continue
 
         messages = [
             {"role": "system", "content": instructions},
-            {"role": "user", "content": f'parameters:{state["parameters"]} text:{page}'}
+            {"role": "user", "content": f"parameters: ['{param}']\ntext:\n{combined_text}"}
         ]
 
         try:
             response = agent.invoke({"messages": messages})
             structured = response.get("structured_response", response)
-            results.append(structured)
+            result.append(structured)
+
+            value = structured.model_dump().get(param, {})
+            print(value)
+
+
         except Exception as e:
-            print(f" Error on recheck page {page_num}: {e}")
+            print(f"Error extracting {param}: {e}")
             continue
 
-    return {"candidates": results}
+    print("Extraction completed.")
+
+    return {
+        "candidates": result,
+    }
+
 
 
 
 def classification(state: State) -> OutputState:
-    
     combined_result = {}
 
     for candidate in state["candidates"]:
         result = candidate.result if hasattr(candidate, "result") else candidate
         for param, value in result.model_dump().items():
-            if param not in combined_result or value.get("score", 0) > combined_result[param].get("score", 0):
+            new_score = value.get("score", 0)
+            current = combined_result.get(param)
+
+            if (
+                current is None
+                or new_score > current.get("score", 0)
+                or (
+                    new_score == current.get("score", 0)
+                    and len(value.get("answer", "")) > len(current.get("answer", ""))
+                )
+            ):
                 combined_result[param] = value
 
-    
-   
     return {"result": combined_result}
-
-
-
-
-

@@ -1,42 +1,52 @@
-import sys
-from graph.data_finder_flow import data_finder_flow
-from dotenv import load_dotenv
+import argparse
 import json
 import os
 
-# Load environment variables from .env file
-load_dotenv()
+from dotenv import load_dotenv
+from graph.data_finder_flow import data_finder_flow
 
-def help():
-    return """to use for pass json and pdf"""
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Extract structured information from Hebrew tender PDF documents."
+    )
+
+    parser.add_argument(
+        "path_to_json",
+        help="Path to the JSON file that defines the extraction parameters."
+    )
+
+    parser.add_argument(
+        "path_to_pdf",
+        help="Path to the PDF document."
+    )
+
+    parser.add_argument(
+        "--output",
+        help="Optional path for the output JSON file."
+    )
+
+    return parser.parse_args()
 
 
 def main():
+    load_dotenv()
 
-    path_to_json = sys.argv[1]
-    path_to_pdf = sys.argv[2]
+    args = parse_args()
 
-    if path_to_json in ["--help", "--h"] or not path_to_pdf:
-        return help()
-
-
-
-    # Run the data extraction flow
     result = data_finder_flow.invoke({
-        "path_to_json": path_to_json,
-        "path_to_pdf": path_to_pdf
-
+        "path_to_json": args.path_to_json,
+        "path_to_pdf": args.path_to_pdf
     })
-    print(result)
 
-    print("Data extraction completed")
-
-    # Generate output file name based on PDF name
-    pdf_name = os.path.splitext(os.path.basename(path_to_pdf))[0]
-    output_path = f"{pdf_name}_results.json"
+    pdf_name = os.path.splitext(os.path.basename(args.path_to_pdf))[0]
+    output_path = args.output or f"{pdf_name}_results.json"
 
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
+
+    print("Data extraction completed")
+    print(f"Results saved to: {output_path}")
 
 
 if __name__ == "__main__":

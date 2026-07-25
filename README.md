@@ -206,25 +206,4 @@ Planned improvements include:
 * Add Docker support
 * Add CI checks with GitHub Actions
 
-## Repository Description
 
-Suggested GitHub repository description:
-
-```text
-AI-powered document extraction pipeline for Hebrew tender PDFs using Python, LLMs, structured JSON output, and confidence scoring.
-```
-
-## Suggested Topics
-
-Suggested GitHub topics:
-
-```text
-python
-llm
-prompt-engineering
-document-extraction
-pdf-processing
-json
-hebrew-nlp
-automation
-```
